@@ -1,10 +1,4 @@
-"""MySQL Shell plugin: dbsize
-
-Provides instance-, schema-, and table-level size helpers:
-  - dbsize.instance()
-  - dbsize.schema('schema_name')
-  - dbsize.table('schema.table')
-"""
+"""MySQL Shell plugin: dbsize"""
 
 
 def _require_session():
@@ -19,173 +13,127 @@ def _require_session():
 def _query(sql, params=None):
     sess = _require_session()
     params = params or []
-
     if hasattr(sess, "run_sql"):
         return sess.run_sql(sql, params)
     return sess.execute_sql(sql, params)
 
 
-def _format_size(size_bytes):
-    if size_bytes is None:
-        return "0 B"
+def instance():
+    """Query instance size grouped by schema."""
+    res = _query(
+        """
+        SELECT
+          table_schema AS `database`,
+          SUM(table_rows) AS `row_count`,
+          SUM(TRUNCATE(data_length/1024/1024, 2)) AS `data_size_mb`,
+          SUM(TRUNCATE(index_length/1024/1024, 2)) AS `index_size_mb`,
+          SUM(TRUNCATE(data_free/1024/1024, 2)) AS `fragment_size_mb`
+        FROM information_schema.tables
+        GROUP BY table_schema
+        ORDER BY SUM(data_length) DESC, SUM(index_length) DESC
+        """
+    )
 
-    units = ["B", "KB", "MB", "GB", "TB", "PB"]
-    size = float(size_bytes)
-    unit_idx = 0
+    rows = []
+    for row in res.fetch_all():
+        rows.append(
+            {
+                "database": row[0],
+                "row_count": int(row[1] or 0),
+                "data_size_mb": float(row[2] or 0),
+                "index_size_mb": float(row[3] or 0),
+                "fragment_size_mb": float(row[4] or 0),
+            }
+        )
+    return rows
 
-    while size >= 1024 and unit_idx < len(units) - 1:
-        size /= 1024
-        unit_idx += 1
 
-    return "%.2f %s" % (size, units[unit_idx])
+def schema(schema_name):
+    """Query one schema size summary."""
+    if not schema_name:
+        raise ValueError("schema_name is required, for example: dbsize.schema('sakila')")
+
+    res = _query(
+        """
+        SELECT
+          table_schema AS `database`,
+          SUM(table_rows) AS `row_count`,
+          SUM(TRUNCATE(data_length/1024/1024, 2)) AS `data_size_mb`,
+          SUM(TRUNCATE(index_length/1024/1024, 2)) AS `index_size_mb`,
+          SUM(TRUNCATE(data_free/1024/1024, 2)) AS `fragment_size_mb`
+        FROM information_schema.tables
+        WHERE table_schema = ?
+        ORDER BY data_length DESC, index_length DESC
+        """,
+        [schema_name],
+    )
+
+    row = res.fetch_one()
+    if row is None:
+        return {
+            "database": schema_name,
+            "row_count": 0,
+            "data_size_mb": 0.0,
+            "index_size_mb": 0.0,
+            "fragment_size_mb": 0.0,
+        }
+
+    return {
+        "database": row[0],
+        "row_count": int(row[1] or 0),
+        "data_size_mb": float(row[2] or 0),
+        "index_size_mb": float(row[3] or 0),
+        "fragment_size_mb": float(row[4] or 0),
+    }
 
 
-def _split_schema_table(table_name):
+def table(table_name):
+    """Query one table size using format 'schema.table'."""
     parts = table_name.split(".", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(
             "Invalid table name. Use format 'schema.table', for example: dbsize.table('sakila.actor')"
         )
-    return parts[0], parts[1]
 
-
-def instance():
-    """Return size summary for all non-system schemas and total instance size."""
-    res = _query(
-        """
-        SELECT
-            table_schema,
-            COALESCE(SUM(data_length + index_length), 0) AS size_bytes
-        FROM information_schema.tables
-        WHERE table_schema NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
-        GROUP BY table_schema
-        ORDER BY size_bytes DESC
-        """
-    )
-
-    rows = res.fetch_all()
-    schemas = []
-    total = 0
-
-    for row in rows:
-        size_bytes = int(row[1] or 0)
-        total += size_bytes
-        schemas.append(
-            {
-                "schema": row[0],
-                "size_bytes": size_bytes,
-                "size_human": _format_size(size_bytes),
-            }
-        )
-
-    return {
-        "schema_count": len(schemas),
-        "total_size_bytes": total,
-        "total_size_human": _format_size(total),
-        "schemas": schemas,
-    }
-
-
-def schema(schema_name):
-    """Return size summary for one schema and its tables."""
-    if not schema_name:
-        raise ValueError("schema_name is required, for example: dbsize.schema('sakila')")
-
-    schema_total_res = _query(
-        """
-        SELECT COALESCE(SUM(data_length + index_length), 0)
-        FROM information_schema.tables
-        WHERE table_schema = ?
-        """,
-        [schema_name],
-    )
-    schema_total_row = schema_total_res.fetch_one()
-    schema_total = int(schema_total_row[0] or 0)
-
-    table_res = _query(
-        """
-        SELECT
-            table_name,
-            COALESCE(data_length + index_length, 0) AS size_bytes
-        FROM information_schema.tables
-        WHERE table_schema = ?
-        ORDER BY size_bytes DESC, table_name ASC
-        """,
-        [schema_name],
-    )
-
-    tables = []
-    for row in table_res.fetch_all():
-        size_bytes = int(row[1] or 0)
-        tables.append(
-            {
-                "table": row[0],
-                "size_bytes": size_bytes,
-                "size_human": _format_size(size_bytes),
-            }
-        )
-
-    return {
-        "schema": schema_name,
-        "table_count": len(tables),
-        "total_size_bytes": schema_total,
-        "total_size_human": _format_size(schema_total),
-        "tables": tables,
-    }
-
-
-def table(table_name):
-    """Return size for one table using format 'schema.table'."""
-    schema_name, tbl_name = _split_schema_table(table_name)
+    schema_name, tbl_name = parts[0], parts[1]
 
     res = _query(
         """
         SELECT
-            table_schema,
-            table_name,
-            COALESCE(data_length + index_length, 0) AS size_bytes,
-            COALESCE(data_length, 0) AS data_bytes,
-            COALESCE(index_length, 0) AS index_bytes
+          table_schema AS `database`,
+          table_name AS `table_name`,
+          table_rows AS `row_count`,
+          TRUNCATE(data_length/1024/1024, 2) AS `data_size_mb`,
+          TRUNCATE(index_length/1024/1024, 2) AS `index_size_mb`,
+          TRUNCATE(data_free/1024/1024, 2) AS `fragment_size_mb`
         FROM information_schema.tables
         WHERE table_schema = ? AND table_name = ?
+        ORDER BY data_length DESC, index_length DESC
         """,
         [schema_name, tbl_name],
     )
-    row = res.fetch_one()
 
+    row = res.fetch_one()
     if row is None:
         raise ValueError("Table not found: %s" % table_name)
 
-    size_bytes = int(row[2] or 0)
-    data_bytes = int(row[3] or 0)
-    index_bytes = int(row[4] or 0)
-
     return {
-        "schema": row[0],
-        "table": row[1],
-        "size_bytes": size_bytes,
-        "size_human": _format_size(size_bytes),
-        "data_bytes": data_bytes,
-        "data_human": _format_size(data_bytes),
-        "index_bytes": index_bytes,
-        "index_human": _format_size(index_bytes),
+        "database": row[0],
+        "table_name": row[1],
+        "row_count": int(row[2] or 0),
+        "data_size_mb": float(row[3] or 0),
+        "index_size_mb": float(row[4] or 0),
+        "fragment_size_mb": float(row[5] or 0),
     }
 
 
-# Register plugin object and methods in MySQL Shell.
 plugin_obj = shell.create_extension_object()
 
 shell.add_extension_object_member(
     plugin_obj,
     "instance",
     instance,
-    {
-        "brief": "Show size summary for all schemas in the current MySQL instance.",
-        "details": [
-            "Aggregates data_length + index_length from information_schema.tables.",
-            "System schemas are excluded: information_schema, mysql, performance_schema, sys.",
-        ],
-    },
+    {"brief": "Show instance size grouped by schema."},
 )
 
 shell.add_extension_object_member(
@@ -193,7 +141,7 @@ shell.add_extension_object_member(
     "schema",
     schema,
     {
-        "brief": "Show size summary for a schema.",
+        "brief": "Show one schema size.",
         "parameters": [{"name": "schema_name", "type": "string", "brief": "Schema name."}],
     },
 )
@@ -203,7 +151,7 @@ shell.add_extension_object_member(
     "table",
     table,
     {
-        "brief": "Show size for one table.",
+        "brief": "Show one table size.",
         "parameters": [
             {
                 "name": "table_name",
@@ -214,13 +162,4 @@ shell.add_extension_object_member(
     },
 )
 
-shell.register_global(
-    "dbsize",
-    plugin_obj,
-    {
-        "brief": "Database size helper plugin.",
-        "details": [
-            "Use dbsize.instance(), dbsize.schema('schema_name'), and dbsize.table('schema.table')."
-        ],
-    },
-)
+shell.register_global("dbsize", plugin_obj, {"brief": "Database size helper plugin."})
