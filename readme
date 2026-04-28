@@ -1,1 +1,61 @@
-mysql shell plugin for db size
+# mysql shell plugin for db size
+
+该仓库提供一个 MySQL Shell 插件 `dbsize`，用于快速查看：
+
+- 实例级别大小：`dbsize.instance()`
+- Schema 级别大小：`dbsize.schema('数据库名')`
+- 表级别大小：`dbsize.table('schema.table')`
+
+## 目录结构
+
+- `dbsize/init.py`：插件入口文件（Python 插件）
+
+## 安装方式（参考 lefred/mysqlshell-plugins）
+
+> 以下示例以 Linux/macOS 为例。
+
+1. 找到 MySQL Shell 用户插件目录（通常是 `~/.mysqlsh/plugins/`）
+2. 将本项目中的 `dbsize` 目录拷贝到该目录下：
+
+```bash
+mkdir -p ~/.mysqlsh/plugins
+cp -R dbsize ~/.mysqlsh/plugins/
+```
+
+最终结构类似：
+
+```text
+~/.mysqlsh/plugins/
+└── dbsize/
+    └── init.py
+```
+
+3. 启动 mysqlsh 并连接数据库：
+
+```bash
+mysqlsh --sqlc user@host:3306
+```
+
+或进入 Python 模式后连接。
+
+## 使用示例
+
+```python
+# 实例级别（统计所有非系统 schema）
+dbsize.instance()
+
+# 指定 schema
+dbsize.schema('sakila')
+
+# 指定表
+dbsize.table('sakila.actor')
+```
+
+## 统计来源
+
+插件基于 `information_schema.tables` 的以下字段：
+
+- `data_length`
+- `index_length`
+
+总大小按 `data_length + index_length` 计算。
